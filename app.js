@@ -1567,6 +1567,102 @@
         });
     };
 
+    // ---------- KolibriOS VM Integration ----------
+    async function launchKolibriVM() {
+        // 1. Create or reuse a modal for the VM
+        let vmModal = document.getElementById('vm-modal');
+        if (!vmModal) {
+            vmModal = document.createElement('div');
+            vmModal.id = 'vm-modal';
+            vmModal.className = 'modal-back';
+            // Using your existing CSS classes for a retro feel
+            vmModal.innerHTML = `
+                <div class="modalwin" style="width:min(820px,100%);height:min(640px,100%);">
+                    <div class="titlebar">
+                        <div class="title"><span class="logo"></span>KolibriOS Virtual Machine</div>
+                        <div class="winbtns"><button class="close" id="vm-close">✕</button></div>
+                    </div>
+                    <div class="modalbody" id="vm-screen" style="padding:0;overflow:hidden;background:#000;align-items:stretch;"></div>
+                    <div class="modalfoot">
+                        <div class="info" id="vm-status">Loading v86 engine...</div>
+                        <button class="btn" id="vm-stop">Stop VM</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(vmModal);
+
+            const stopVM = () => {
+                if (window._kolibriEmulator) {
+                    window._kolibriEmulator.stop();
+                    window._kolibriEmulator = null;
+                }
+                vmModal.hidden = true;
+            };
+
+            vmModal.querySelector('#vm-close').onclick = stopVM;
+            vmModal.querySelector('#vm-stop').onclick = stopVM;
+        }
+
+        vmModal.hidden = false;
+        const screen = vmModal.querySelector('#vm-screen');
+        const status = vmModal.querySelector('#vm-status');
+        status.textContent = 'Loading v86 engine...';
+
+        // 2. Dynamically load libv86.js if it's not already loaded
+        if (typeof V86 === 'undefined') {
+            try {
+                await new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = 'v86/libv86.js';
+                    script.onload = resolve;
+                    script.onerror = () => reject(new Error('Failed to load libv86.js'));
+                    document.head.appendChild(script);
+                });
+            } catch (e) {
+                status.textContent = 'Error: Could not load the v86 engine.';
+                return;
+            }
+        }
+
+        // 3. Load the KolibriOS image from your v86/ folder
+        status.textContent = 'Fetching KolibriOS image...';
+        let imageBuffer;
+        try {
+            const resp = await fetch('v86/kolibrios-0.7.7.0-9252-g17a0b9d7-en_US.img');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            imageBuffer = await resp.arrayBuffer();
+        } catch (e) {
+            status.textContent = 'Failed to load image: ' + e.message;
+            return;
+        }
+
+        // 4. Initialize and boot v86
+        status.textContent = 'Booting KolibriOS...';
+        screen.innerHTML = ''; // Clear previous canvas if restarting
+        
+        window._kolibriEmulator = new V86({
+            wasm_path: 'v86/v86.wasm',
+            memory_size: 64 * 1024 * 1024, // 64MB RAM
+            vga_memory_size: 8 * 1024 * 1024,
+            screen_container: screen,
+            bios: { url: 'v86/seabios.bin' },
+            vga_bios: { url: 'v86/vgabios.bin' },
+            
+            // Mount the OS image as a floppy drive (fda)
+            fda: { buffer: imageBuffer },
+            
+            // Network configuration for internet access
+            nic_type: 'ne2k',
+            network_relay_url: 'wss://relay.widgetry.org/', // Public WebSocket relay
+            
+            disable_speaker: true,
+            autostart: true,
+        });
+
+        window._kolibriEmulator.add_listener('emulator-ready', () => {
+            status.textContent = 'Running. (Use terminal to run "dhcpcd" if network is offline)';
+        });
+    }
+
     const act = {
         upload: () => { if (canWrite()) $('#fileInput').click(); },
         uploadfolder: () => { if (canWrite()) $('#folderInput').click(); },
@@ -1658,6 +1754,7 @@
         features: () => showAbout('features'),
         tutorial: () => showAbout('tutorial'),
         steganography: () => { $('#steg-modal').hidden = false; },
+        launch_vm: () => launchKolibriVM(),
         find_duplicates: async () => {
             $('#dup-modal').hidden = false;
             $('#dup-list').textContent = 'Scanning...';
