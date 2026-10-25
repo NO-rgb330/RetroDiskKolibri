@@ -1567,14 +1567,13 @@
         });
     };
 
-    // ---------- KolibriOS VM Integration ----------
+      // ---------- KolibriOS VM Integration ----------
     async function launchKolibriVM() {
         let vmModal = document.getElementById('vm-modal');
         if (!vmModal) {
             vmModal = document.createElement('div');
             vmModal.id = 'vm-modal';
             vmModal.className = 'modal-back';
-            // Added fullscreen button and styling
             vmModal.innerHTML = `
                 <div class="modalwin" style="width:min(820px,100%);height:min(640px,100%);">
                     <div class="titlebar">
@@ -1590,9 +1589,10 @@
                 </div>`;
             document.body.appendChild(vmModal);
 
-            // Inject CSS for fullscreen mode
+            // CSS for fullscreen mode
             const style = document.createElement('style');
             style.innerHTML = `
+                #vm-modal:fullscreen .modalwin,
                 #vm-modal.vm-fullscreen .modalwin {
                     width: 100vw !important;
                     height: 100vh !important;
@@ -1601,6 +1601,7 @@
                     border-radius: 0 !important;
                     border: none !important;
                 }
+                #vm-modal:fullscreen .modalbody,
                 #vm-modal.vm-fullscreen .modalbody {
                     background: #000;
                 }
@@ -1608,6 +1609,10 @@
                     max-width: 100%;
                     max-height: 100%;
                     object-fit: contain;
+                    /* Hide the host cursor when pointer is locked */
+                }
+                #vm-screen.locked canvas {
+                    cursor: none !important;
                 }
             `;
             document.head.appendChild(style);
@@ -1619,23 +1624,35 @@
                 }
                 vmModal.hidden = true;
                 vmModal.classList.remove('vm-fullscreen');
+                if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
             };
 
             vmModal.querySelector('#vm-close').onclick = stopVM;
             vmModal.querySelector('#vm-stop').onclick = stopVM;
             
+            // True Fullscreen Toggle
             vmModal.querySelector('#vm-fs').onclick = () => {
-                vmModal.classList.toggle('vm-fullscreen');
+                if (!document.fullscreenElement) {
+                    vmModal.requestFullscreen().catch(e => console.error(e));
+                } else {
+                    document.exitFullscreen();
+                }
             };
+
+            // Listen to fullscreen changes to update button text
+            document.addEventListener('fullscreenchange', () => {
+                const btn = vmModal.querySelector('#vm-fs');
+                if (btn) {
+                    btn.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
+                }
+            });
         }
 
         vmModal.hidden = false;
         const screen = vmModal.querySelector('#vm-screen');
         const status = vmModal.querySelector('#vm-status');
         
-        // Focus the screen so keyboard inputs go to the VM immediately
         screen.focus();
-        
         status.textContent = 'Loading v86 engine...';
 
         if (typeof V86 === 'undefined') {
@@ -1681,157 +1698,33 @@
             autostart: true,
         });
 
+        // --- POINTER LOCK (FIX TWO CURSORS) ---
+        // v86 creates the canvas after a tiny delay, so we attach the listener to the container
+        screen.addEventListener('click', (e) => {
+            // If we click the canvas and we aren't already locked, request pointer lock
+            if (e.target.tagName === 'CANVAS' && !document.pointerLockElement) {
+                e.target.requestPointerLock();
+            }
+        });
+
+        // Handle the UI when mouse is locked/unlocked
+        document.addEventListener('pointerlockchange', () => {
+            if (document.pointerLockElement) {
+                screen.classList.add('locked');
+                status.textContent = 'Mouse locked. Press ESC to release.';
+            } else {
+                screen.classList.remove('locked');
+                status.textContent = 'Running. (Click screen to lock mouse)';
+            }
+        });
+        // --------------------------------------
+
         window._kolibriEmulator.add_listener('emulator-ready', () => {
-            status.textContent = 'Running. (Use terminal to run "dhcpcd" if network is offline)';
+            status.textContent = 'Running. (Click screen to lock mouse)';
             const canvas = screen.querySelector('canvas');
             if (canvas) canvas.focus();
         });
     }
-
-    const act = {
-        upload: () => { if (canWrite()) $('#fileInput').click(); },
-        uploadfolder: () => { if (canWrite()) $('#folderInput').click(); },
-        newfolder: () => {
-            if (!canWrite()) return;
-            dlg({ title: 'New Folder', label: 'Name:', value: 'New Folder' }).then(async n => {
-                n = n && clean(n); if (!n) return;
-                const nd = { id: uid(), parentId: st.cwd, name: await uniq(n, st.cwd), kind: 'folder', size: 0, compSize: 0, created: Date.now(), modified: Date.now() };
-                await req(sto(N, 'readwrite').add(nd));
-                await refresh();
-            });
-        },
-        extractzip: () => { if (canWrite()) $('#zipInput').click(); },
-        download: () => { const ns = selNodes(); if (ns.some(i => i.kind === 'folder')) return act.downloadzip(); return dlNodes(ns); },
-        downloadzip: async () => {
-            if (typeof fflate === 'undefined') return stat('ZIP library failed to load.');
-            const ns = selNodes(); if (!ns.length) return;
-            const out = {};
-            for (const n of ns) await gatherZip(n, '', out);
-            if (!Object.keys(out).length) return stat('Nothing to save.');
-            saveBlob(new Blob([fflate.zipSync(out)], { type: 'application/zip' }), ns.length === 1 && ns[0].kind === 'folder' ? ns[0].name + '.zip' : 'Export.zip');
-        },
-        delete: () => {
-            const ids = Array.from(st.sel);
-            if (!ids.length) return;
-            const inTr = st.cwd === TRASH;
-            confirmDlg('Confirm', inTr ? `Permanently DELETE ${ids.length} item(s)?` : `Move ${ids.length} item(s) to Trash?`).then(async ok => {
-                if (!ok) return;
-                for (const id of ids) { if (inTr) await del(id); else await moveToTrash(id); }
-                st.sel.clear(); await refresh();
-            });
-        },
-        restore: async () => {
-            if (st.cwd !== TRASH) return;
-            for (const id of Array.from(st.sel)) await restoreNode(id);
-            st.sel.clear(); await refresh(); stat('Restored.');
-        },
-        batchrename: () => {
-            const ns = selNodes(); if (!ns.length || st.cwd === TRASH) return;
-            dlg({ title: 'Batch Rename', label: 'Prefix (e.g. File_):', value: 'File_' }).then(async p => {
-                p = p && clean(p); if (!p) return;
-                const w = Math.max(2, String(ns.length).length);
-                for (let i = 0; i < ns.length; i++) {
-                    const n = ns[i], e = n.kind === 'file' && extOf(n.name) ? '.' + extOf(n.name) : '';
-                    n.name = await uniq(p + String(i + 1).padStart(w, '0') + e, n.parentId, n.id);
-                    n.modified = Date.now();
-                    await put(n);
-                }
-                await refresh();
-            });
-        },
-        shred: () => {
-            const ids = Array.from(st.sel);
-            if (!ids.length) return;
-            confirmDlg('Secure Shred', `Overwrite and permanently delete ${ids.length} item(s)? This cannot be undone. (Best effort: browsers and SSDs can't guarantee physical erasure.)`, 'SHRED').then(async ok => {
-                if (!ok) return;
-                stat('Shredding...');
-                for (const id of ids) await shredNode(id);
-                st.sel.clear(); await refresh(); stat('Shredded.');
-            });
-        },
-        up: () => nav(st.path.length ? (st.path[st.path.length - 1].parentId || R) : R),
-        trash: () => nav(TRASH),
-        empty_trash: () => {
-            confirmDlg('Empty Trash', 'Permanently delete ALL items in Trash?', 'Empty').then(async ok => {
-                if (!ok) return;
-                for (const item of await list(TRASH)) await del(item.id);
-                await refresh(); stat('Trash emptied.');
-            });
-        },
-        rename: () => {
-            const n = selNodes()[0]; if (!n || st.cwd === TRASH) return;
-            const e = n.kind === 'file' && extOf(n.name) ? '.' + extOf(n.name) : '', b = e ? n.name.slice(0, -e.length) : n.name;
-            dlg({ title: 'Rename', label: 'New name:', value: b, hint: e ? `Extension preserved: ${e}` : '' }).then(async v => {
-                v = v && clean(v); if (!v || v === b) return;
-                n.name = await uniq(v + e, n.parentId, n.id);
-                n.modified = Date.now();
-                await put(n); await refresh();
-            });
-        },
-        toggle_view: () => { st.isGrid = !st.isGrid; ls.set('rd_grid', st.isGrid ? '1' : '0'); $('#btnView').textContent = st.isGrid ? 'List' : 'Grid'; render(); },
-        clear_wallpaper: () => { $('#app').style.backgroundImage = ''; $('#app').classList.remove('wp'); ls.del('rd_wallpaper'); },
-        theme_default: () => setTheme('default'),
-        theme_win98: () => setTheme('win98'),
-        theme_mac: () => setTheme('mac'),
-        theme_dark: () => setTheme('dark'),
-        webrtc: () => { $('#webrtc-modal').hidden = false; },
-        about: () => showAbout('about'),
-        features: () => showAbout('features'),
-        tutorial: () => showAbout('tutorial'),
-        steganography: () => { $('#steg-modal').hidden = false; },
-        launch_vm: () => launchKolibriVM(),
-        find_duplicates: async () => {
-            $('#dup-modal').hidden = false;
-            $('#dup-list').textContent = 'Scanning...';
-            const all = await req(sto(N).getAll()), tr = trashedIds(all);
-            const groups = {};
-            all.filter(n => n.kind === 'file' && n.hash && n.size > 0 && !tr.has(n.id)).forEach(f => (groups[f.hash] = groups[f.hash] || []).push(f));
-            const dups = Object.values(groups).filter(g => g.length > 1);
-            if (!dups.length) { $('#dup-list').innerHTML = '<div style="text-align:center;padding:20px;color:var(--tx-m);">No duplicates found.</div>'; return; }
-            $('#dup-list').innerHTML = dups.map((g, i) => `
-                <div class="dup-group" style="margin-bottom:15px;border:1px solid var(--bd-l);padding:10px;border-radius:4px;background:var(--pn);">
-                    <b>Group ${i + 1} (${fmtSz(g[0].size)})</b><br>
-                    ${g.map((f, j) => `<label style="display:block;margin:4px 0;"><input type="checkbox" class="dup-chk" data-g="${i}" value="${esc(f.id)}" ${j > 0 ? 'checked' : ''} style="width:auto;margin:0 6px 0 0;"> ${esc(f.name)}</label>`).join('')}
-                </div>`).join('');
-        }
-    };
-
-    const showAbout = tab => {
-        document.querySelectorAll('.about-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-        document.querySelectorAll('.about-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === tab));
-        $('#aboutBody').scrollTop = 0;
-        $('#about-modal').hidden = false;
-    };
-
-    const setTheme = t => { document.body.dataset.theme = t; ls.set('rd_theme', t); };
-
-    const showProps = async () => {
-        const n = selNodes()[0]; if (!n) return;
-        $('#prop-table').innerHTML = `
-            <tr><td>Name</td><td>${esc(n.name)}</td></tr>
-            <tr><td>Type</td><td>${cat(n).label}</td></tr>
-            <tr><td>Size</td><td>${n.kind === 'folder' ? '—' : `${fmtSz(n.size)} (Stored: ${fmtSz(n.compSize)})`}</td></tr>
-            <tr><td>Created</td><td>${fmtDt(n.created)}</td></tr>
-            <tr><td>Modified</td><td>${fmtDt(n.modified)}</td></tr>
-            <tr><td>Encrypted</td><td>${n.encrypted ? 'Yes (AES-256-GCM)' : 'No'}</td></tr>
-            <tr><td>Compressed</td><td>${n.compressed ? 'Yes (Gzip)' : 'No'}</td></tr>
-            <tr><td>SHA-256</td><td style="font-family:monospace;word-break:break-all;">${esc(n.hash || '—')}</td></tr>`;
-        $('#prop-modal').hidden = false;
-    };
-
-    const nav = async id => {
-        if (id !== R && id !== TRASH && !(await node(id))) return;
-        st.cwd = id; st.sel.clear(); sQuery = ''; $('#searchInput').value = '';
-        await refresh();
-    };
-
-    const replaceNode = async (n, file, pwd) => {
-        const nd = await add(file, n.parentId, pwd, { exclude: n.id, hint: n.hint, ro: n.ro, tag: n.tag, created: n.created });
-        await del(n.id);
-        st.quickAccess = st.quickAccess.map(i => i === n.id ? nd.id : i); saveQuick();
-        return nd;
-    };
-
     // ---------- image editor ----------
     const closeImgEditor = () => {
         $('#img-editor-modal').hidden = true;
