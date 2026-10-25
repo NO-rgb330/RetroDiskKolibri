@@ -1569,26 +1569,48 @@
 
     // ---------- KolibriOS VM Integration ----------
     async function launchKolibriVM() {
-        // 1. Create or reuse a modal for the VM
         let vmModal = document.getElementById('vm-modal');
         if (!vmModal) {
             vmModal = document.createElement('div');
             vmModal.id = 'vm-modal';
             vmModal.className = 'modal-back';
-            // Using your existing CSS classes for a retro feel
+            // Added fullscreen button and styling
             vmModal.innerHTML = `
                 <div class="modalwin" style="width:min(820px,100%);height:min(640px,100%);">
                     <div class="titlebar">
                         <div class="title"><span class="logo"></span>KolibriOS Virtual Machine</div>
                         <div class="winbtns"><button class="close" id="vm-close">✕</button></div>
                     </div>
-                    <div class="modalbody" id="vm-screen" style="padding:0;overflow:hidden;background:#000;align-items:stretch;"></div>
+                    <div class="modalbody" id="vm-screen" tabindex="0" style="padding:0;overflow:hidden;background:#000;align-items:stretch;display:flex;flex-direction:column;"></div>
                     <div class="modalfoot">
                         <div class="info" id="vm-status">Loading v86 engine...</div>
+                        <button class="btn" id="vm-fs">Fullscreen</button>
                         <button class="btn" id="vm-stop">Stop VM</button>
                     </div>
                 </div>`;
             document.body.appendChild(vmModal);
+
+            // Inject CSS for fullscreen mode
+            const style = document.createElement('style');
+            style.innerHTML = `
+                #vm-modal.vm-fullscreen .modalwin {
+                    width: 100vw !important;
+                    height: 100vh !important;
+                    max-width: 100vw !important;
+                    max-height: 100vh !important;
+                    border-radius: 0 !important;
+                    border: none !important;
+                }
+                #vm-modal.vm-fullscreen .modalbody {
+                    background: #000;
+                }
+                #vm-screen canvas {
+                    max-width: 100%;
+                    max-height: 100%;
+                    object-fit: contain;
+                }
+            `;
+            document.head.appendChild(style);
 
             const stopVM = () => {
                 if (window._kolibriEmulator) {
@@ -1596,18 +1618,26 @@
                     window._kolibriEmulator = null;
                 }
                 vmModal.hidden = true;
+                vmModal.classList.remove('vm-fullscreen');
             };
 
             vmModal.querySelector('#vm-close').onclick = stopVM;
             vmModal.querySelector('#vm-stop').onclick = stopVM;
+            
+            vmModal.querySelector('#vm-fs').onclick = () => {
+                vmModal.classList.toggle('vm-fullscreen');
+            };
         }
 
         vmModal.hidden = false;
         const screen = vmModal.querySelector('#vm-screen');
         const status = vmModal.querySelector('#vm-status');
+        
+        // Focus the screen so keyboard inputs go to the VM immediately
+        screen.focus();
+        
         status.textContent = 'Loading v86 engine...';
 
-        // 2. Dynamically load libv86.js if it's not already loaded
         if (typeof V86 === 'undefined') {
             try {
                 await new Promise((resolve, reject) => {
@@ -1623,7 +1653,6 @@
             }
         }
 
-        // 3. Load the KolibriOS image from your v86/ folder
         status.textContent = 'Fetching KolibriOS image...';
         let imageBuffer;
         try {
@@ -1635,31 +1664,27 @@
             return;
         }
 
-        // 4. Initialize and boot v86
         status.textContent = 'Booting KolibriOS...';
-        screen.innerHTML = ''; // Clear previous canvas if restarting
+        screen.innerHTML = ''; 
         
         window._kolibriEmulator = new V86({
             wasm_path: 'v86/v86.wasm',
-            memory_size: 64 * 1024 * 1024, // 64MB RAM
+            memory_size: 64 * 1024 * 1024,
             vga_memory_size: 8 * 1024 * 1024,
             screen_container: screen,
             bios: { url: 'v86/seabios.bin' },
             vga_bios: { url: 'v86/vgabios.bin' },
-            
-            // Mount the OS image as a floppy drive (fda)
             fda: { buffer: imageBuffer },
-            
-            // Network configuration for internet access
             nic_type: 'ne2k',
-            network_relay_url: 'wss://relay.widgetry.org/', // Public WebSocket relay
-            
+            network_relay_url: 'wss://relay.widgetry.org/',
             disable_speaker: true,
             autostart: true,
         });
 
         window._kolibriEmulator.add_listener('emulator-ready', () => {
             status.textContent = 'Running. (Use terminal to run "dhcpcd" if network is offline)';
+            const canvas = screen.querySelector('canvas');
+            if (canvas) canvas.focus();
         });
     }
 
@@ -2368,8 +2393,11 @@
 
         document.addEventListener('keydown', async e => {
             if (e.key === 'Escape') {
+                // Fix: if pointer lock is active (in VM), escape releases the mouse without closing the modal
+                if (document.pointerLockElement) return;
+                
                 if (!$('#dlg').hidden) { dlgCl(null); return; }
-                for (const [id, fn] of [['#about-modal', () => { $('#about-modal').hidden = true; }], ['#img-editor-modal', closeImgEditor], ['#modal', closePreview], ['#prop-modal', () => { $('#prop-modal').hidden = true; }], ['#webrtc-modal', () => { $('#webrtc-modal').hidden = true; }], ['#steg-modal', () => { $('#steg-modal').hidden = true; }], ['#dup-modal', () => { $('#dup-modal').hidden = true; }]]) {
+                for (const [id, fn] of [['#about-modal', () => { $('#about-modal').hidden = true; }], ['#img-editor-modal', closeImgEditor], ['#modal', closePreview], ['#prop-modal', () => { $('#prop-modal').hidden = true; }], ['#webrtc-modal', () => { $('#webrtc-modal').hidden = true; }], ['#steg-modal', () => { $('#steg-modal').hidden = true; }], ['#dup-modal', () => { $('#dup-modal').hidden = true; }], ['#vm-modal', () => { if (window._kolibriEmulator) window._kolibriEmulator.stop(); $('#vm-modal').hidden = true; $('#vm-modal').classList.remove('vm-fullscreen'); }]]) {
                     if (!$(id).hidden) { fn(); return; }
                 }
                 $('#ctx-menu').style.display = 'none';
